@@ -469,28 +469,33 @@ function App(){
 
   const doFetch=useCallback(async()=>{
     setLoading(true); setStatusType('loading');
-    const isLocal=window.location.hostname==='localhost'||window.location.hostname==='127.0.0.1';
-    if(isLocal&&!window.__CFG__){
+    // Always try /api/rates first (works both on localhost and on Render/cloud)
+    if(!window.__CFG__){
       try{const cfg=await fetch('/api/config').then(r=>r.json());
         if(cfg.anthropicKey) window.__ANTHROPIC_KEY__=cfg.anthropicKey;
         window.__CFG__=true;}catch(e){}
     }
     try{
       let result,source;
-      if(isLocal){
-        setStatusMsg('Descargando datos de FRED + BCE...');
-        const resp=await fetch('/api/rates');
-        if(!resp.ok) throw new Error('HTTP '+resp.status);
-        result=await resp.json();
-        source=result.source||'FRED + ECB';
-        if(result.ECBASSETS&&result.ECBASSETS.length>0) RH.ECBASSETS=result.ECBASSETS.map(p=>({d:p.date,v:p.spread}));
-        if(result.ECBBNK&&result.ECBBNK.length>0) RH.ECBBNK=result.ECBBNK.map(p=>({d:p.date,v:p.spread}));
-      } else if(window.__ANTHROPIC_KEY__){
-        setStatusMsg('Consultando via Claude...');
-        result=await claudeProxyFetch();
-        source='Claude proxy';
-      } else {
-        throw new Error('Abre con iniciar_dashboard.py para datos en tiempo real');
+      // Try the Python server first (works on localhost AND on Render)
+      let serverAvailable=false;
+      try{
+        const probe=await fetch('/api/rates',{signal:AbortSignal.timeout(8000)});
+        if(probe.ok){ serverAvailable=true;
+          result=await probe.json();
+          source=result.source||'FRED + ECB';
+          if(result.ECBASSETS&&result.ECBASSETS.length>0) RH.ECBASSETS=result.ECBASSETS.map(p=>({d:p.date,v:p.spread}));
+          if(result.ECBBNK&&result.ECBBNK.length>0) RH.ECBBNK=result.ECBBNK.map(p=>({d:p.date,v:p.spread}));
+        }
+      }catch(e){ serverAvailable=false; }
+      if(!serverAvailable){
+        if(window.__ANTHROPIC_KEY__){
+          setStatusMsg('Consultando via Claude...');
+          result=await claudeProxyFetch();
+          source='Claude proxy';
+        } else {
+          throw new Error('Sin servidor disponible — datos embebidos');
+        }
       }
       const merged={};
       GAUGES.forEach(g=>{merged[g.id]=mergeByDate(HIST[g.id]||[],result[g.id]||[]);});
