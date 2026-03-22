@@ -1,0 +1,2 @@
+# No external dependencies — uses Python standard library only
+# urllib, http.server, json, threading, os all built-in

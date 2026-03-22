@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Panel de Liquidez Institucional</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Bebas+Neue&display=swap" rel="stylesheet"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:#07090f;min-height:100vh;font-family:'JetBrains Mono',monospace}
+#root{min-height:100vh}
+#loading{display:flex;align-items:center;justify-content:center;height:100vh;
+  color:#6b7280;font-family:'JetBrains Mono',monospace;font-size:13px;
+  flex-direction:column;gap:14px;background:#07090f}
+.spinner{width:28px;height:28px;border:2px solid #1f2937;border-top-color:#f59e0b;
+  border-radius:50%;animation:spin 0.8s linear infinite}
+.btn{cursor:pointer;transition:all .15s;font-family:'JetBrains Mono',monospace}
+.btn:hover{filter:brightness(1.18)} .btn:active{transform:scale(.97)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.tab-btn{cursor:pointer;transition:all .15s;font-size:10px;padding:5px 14px;
+  border-radius:6px;letter-spacing:.8px;border:none;font-family:'JetBrains Mono',monospace;
+  background:transparent}
+input{outline:none;font-family:'JetBrains Mono',monospace}
+input::placeholder{color:#1f2937}
+.blink{animation:pulse 1.5s infinite}
+@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes spin{to{transform:rotate(360deg)}}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-thumb{background:rgba(245,158,11,.15);border-radius:4px}
+</style>
+</head>
+<body>
+<div id="loading"><div class="spinner"></div><span>Iniciando Panel de Liquidez...</span></div>
+<div id="root" style="display:none"></div>
+
+<!-- React 18 (no JSX needed) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- htm: JSX-like syntax in tagged template literals, zero build -->
+<script src="https://unpkg.com/htm@3/dist/htm.js"></script>
+
+<script>
+'use strict';
+const {useState,useEffect,useCallback,useRef} = React;
+const html = htm.bind(React.createElement);
+
+// ============================================================
+// COLOURS
+// ============================================================
+const C = {
+  bg:'#07090f', panel:'rgba(255,255,255,0.028)', border:'rgba(255,255,255,0.06)',
+  green:'#22c55e', amber:'#f59e0b', red:'#ef4444', dim:'#4b4535',
+  muted:'#a39070', text:'#e5e7eb', accent:'#fbbf24',
+  chart:{effr_iorb:'#fbbf24',sofr_iorb:'#f97316',tgcr_iorb:'#d4a853',
+         cp_sofr:'#ea580c',euribor_estr:'#e2c97e',stlfsi:'#fde68a'},
+  cat:{'USD Reservas':'#fbbf24','USD Repo/Reservas':'#f97316',
+       'USD Interbancario':'#ea580c','EUR Interbancario':'#e2c97e','Indice Agregado':'#fde68a'},
+};
+const LC = {green:C.green,amber:C.amber,red:C.red,dim:C.dim};
+const LL = {green:'VERDE',amber:'AMBAR',red:'ROJO',dim:'N/D'};
+
+// ============================================================
+// GAUGE DEFINITIONS
+// ============================================================
+const GAUGES = [
+  {id:'effr_iorb', label:'EFFR - IORB',      category:'USD Reservas',      amberAbove:-0.02, redAbove:0.03,
+   note:'Senal primaria de reservas. Rojo = persistencia + volatilidad (patron pre-turmoil 2019).'},
+  {id:'sofr_iorb', label:'SOFR - IORB',      category:'USD Repo/Reservas', amberAbove:0.00,  redAbove:0.08,
+   note:'Presion en repo secured. SOFR > IORB sostenido = reservas escasas.'},
+  {id:'tgcr_iorb', label:'TGCR - IORB',      category:'USD Repo/Reservas', amberAbove:-0.02, redAbove:0.05,
+   note:'Tri-Party GCR vs IORB. Complementa SOFR-IORB con la senal del mercado tri-party.'},
+  {id:'cp_sofr',   label:'CP AA 3M - SOFR',  category:'USD Interbancario', amberAbove:0.25,  redAbove:0.50,
+   note:'Sustituto moderno del FRA/OIS (post-LIBOR). Spike = stress credito/liquidez bancario USD.'},
+  {id:'euribor_estr',label:'Euribor 3M - ESTR',category:'EUR Interbancario',amberAbove:0.15, redAbove:0.40,
+   note:'ECB: tipicamente -10/-16 bp en 2023. Paso a positivo persistente = alerta bancaria EUR.'},
+  {id:'stlfsi',    label:'St. Louis FSI',    category:'Indice Agregado',   amberAbove:0.30,  redAbove:0.80,
+   note:'Indice de estres financiero de la Fed (sigma). 0 = normal historico. >1 = estres severo.'},
+];
+
+// ============================================================
+// HISTORICAL SPREAD DATA
+// ============================================================
+const HIST = {
+  effr_iorb:[
+    {date:'2022-03',spread:-0.01},{date:'2022-06',spread:-0.07},{date:'2022-09',spread:-0.07},
+    {date:'2022-12',spread:-0.07},{date:'2023-03',spread:-0.07},{date:'2023-07',spread:-0.07},
+    {date:'2023-12',spread:-0.07},{date:'2024-06',spread:-0.07},{date:'2024-09',spread:-0.07},
+    {date:'2024-12',spread:-0.07},{date:'2025-06',spread:-0.07},{date:'2025-12',spread:-0.07},
+    {date:'2026-01',spread:-0.01},{date:'2026-03',spread:-0.01},
+  ],
+  sofr_iorb:[
+    {date:'2022-03',spread:-0.05},{date:'2022-06',spread:-0.10},{date:'2022-09',spread:-0.09},
+    {date:'2022-12',spread:-0.09},{date:'2023-03',spread:-0.09},{date:'2023-07',spread:-0.08},
+    {date:'2023-12',spread:-0.08},{date:'2024-06',spread:-0.08},{date:'2024-12',spread:-0.08},
+    {date:'2025-12',spread:-0.08},{date:'2026-01',spread:-0.02},{date:'2026-03',spread:-0.02},
+  ],
+  tgcr_iorb:[
+    {date:'2022-03',spread:-0.06},{date:'2022-06',spread:-0.11},{date:'2022-09',spread:-0.10},
+    {date:'2022-12',spread:-0.10},{date:'2023-07',spread:-0.10},{date:'2023-12',spread:-0.10},
+    {date:'2024-06',spread:-0.10},{date:'2024-12',spread:-0.10},{date:'2025-12',spread:-0.10},
+    {date:'2026-01',spread:-0.04},{date:'2026-03',spread:-0.04},
+  ],
+  cp_sofr:[
+    {date:'2022-01',spread:0.08},{date:'2022-03',spread:0.10},{date:'2022-06',spread:0.14},
+    {date:'2022-09',spread:0.20},{date:'2022-12',spread:0.28},{date:'2023-03',spread:0.42},
+    {date:'2023-05',spread:0.24},{date:'2023-07',spread:0.22},{date:'2023-12',spread:0.26},
+    {date:'2024-06',spread:0.26},{date:'2024-12',spread:0.30},{date:'2025-06',spread:0.31},
+    {date:'2025-12',spread:0.32},{date:'2026-01',spread:0.34},{date:'2026-03',spread:0.36},
+  ],
+  euribor_estr:[
+    {date:'2022-01',spread:0.58},{date:'2022-06',spread:0.39},{date:'2022-12',spread:0.17},
+    {date:'2023-03',spread:0.08},{date:'2023-05',spread:-0.10},{date:'2023-09',spread:-0.15},
+    {date:'2023-12',spread:-0.16},{date:'2024-03',spread:-0.08},{date:'2024-06',spread:0.02},
+    {date:'2024-09',spread:0.07},{date:'2024-12',spread:0.07},{date:'2025-03',spread:0.05},
+    {date:'2025-12',spread:0.05},{date:'2026-01',spread:0.06},{date:'2026-03',spread:0.25},
+  ],
+  stlfsi:[
+    {date:'2022-01',spread:-0.35},{date:'2022-03',spread:0.12},{date:'2022-06',spread:0.35},
+    {date:'2022-09',spread:0.08},{date:'2022-12',spread:0.06},{date:'2023-03',spread:0.55},
+    {date:'2023-06',spread:-0.18},{date:'2023-09',spread:-0.20},{date:'2023-12',spread:-0.30},
+    {date:'2024-03',spread:-0.42},{date:'2024-06',spread:-0.40},{date:'2024-09',spread:-0.35},
+    {date:'2024-12',spread:-0.32},{date:'2025-06',spread:-0.18},{date:'2025-12',spread:-0.10},
+    {date:'2026-01',spread:-0.08},{date:'2026-03',spread:-0.04},
+  ],
+};
+
+// ============================================================
+// RATE GROUPS & HISTORY
+// ============================================================
+const RATE_GROUPS = [
+  { label:'Federal Reserve (USD)', color:'#f59e0b', flag:'US',
+    rows:[
+      [{id:'FFTARGETHI',label:'FF Target Max',desc:'Fed Funds Target upper bound',current:3.75,prev:4.50,unit:'%'},
+       {id:'FFTARGETLO',label:'FF Target Min',desc:'Fed Funds Target lower bound',current:3.50,prev:4.25,unit:'%'},
+       {id:'EFFR',      label:'EFFR',         desc:'Effective Federal Funds Rate',current:3.64,prev:4.33,unit:'%'}],
+      [{id:'IORB', label:'IORB',   desc:'Interest on Reserve Balances',     current:3.65,prev:4.40,unit:'%'},
+       {id:'ONRRP',label:'ON RRP', desc:'Overnight Reverse Repo Award Rate',current:3.50,prev:4.25,unit:'%'}],
+      [{id:'SOFR',label:'SOFR',desc:'Secured Overnight Financing Rate',current:3.63,prev:4.31,unit:'%'},
+       {id:'TGCR',label:'TGCR',desc:'Tri-Party General Collateral Rate',current:3.61,prev:4.29,unit:'%'},
+       {id:'BGCR',label:'BGCR',desc:'Broad General Collateral Rate',   current:3.60,prev:4.28,unit:'%'},
+       {id:'OBFR',label:'OBFR',desc:'Overnight Bank Funding Rate',     current:3.63,prev:4.31,unit:'%'}],
+      [{id:'RESBALNS',label:'Reservas Fed',  desc:'Reserve Balances with Fed ($bn)',current:3200,prev:3500,unit:'$bn'},
+       {id:'WCURCIR', label:'Efectivo USD',  desc:'Currency in Circulation ($bn)',  current:2330,prev:2290,unit:'$bn'}],
+    ]},
+  { label:'European Central Bank (EUR)', color:'#e2c97e', flag:'EU',
+    rows:[
+      [{id:'ESTR',  label:'ESTR',           desc:'Euro Short-Term Rate',                   current:2.39,prev:3.39,unit:'%'},
+       {id:'ECBDF', label:'Deposit Fac.',   desc:'ECB Deposit Facility Rate',              current:2.00,prev:3.50,unit:'%'},
+       {id:'ECBMRO',label:'Main Refin.',    desc:'ECB Main Refinancing Operations (Fixed)',current:2.15,prev:3.65,unit:'%'},
+       {id:'ECBMLF',label:'Marginal Lend.', desc:'ECB Marginal Lending Facility Rate',    current:2.40,prev:3.90,unit:'%'}],
+      [{id:'ECBASSETS',label:'Reservas BCE', desc:'Activos totales Eurosistema (EUR bn)',current:6227,prev:7600,unit:'EUR bn'},
+       {id:'ECBBNK',   label:'Efectivo EUR', desc:'Billetes en circulacion (EUR bn)',    current:1595,prev:1568,unit:'EUR bn'}],
+    ]},
+];
+
+const RH = {  // RATES_HISTORY shorthand
+  FFTARGETHI:[{d:'2022-01',v:0.25},{d:'2022-06',v:1.75},{d:'2022-09',v:3.25},{d:'2022-12',v:4.50},{d:'2023-07',v:5.50},{d:'2023-12',v:5.50},{d:'2024-09',v:5.00},{d:'2024-12',v:4.50},{d:'2025-12',v:3.75},{d:'2026-03',v:3.75}],
+  FFTARGETLO:[{d:'2022-01',v:0.00},{d:'2022-06',v:1.50},{d:'2022-09',v:3.00},{d:'2022-12',v:4.25},{d:'2023-07',v:5.25},{d:'2023-12',v:5.25},{d:'2024-09',v:4.75},{d:'2024-12',v:4.25},{d:'2025-12',v:3.50},{d:'2026-03',v:3.50}],
+  EFFR: [{d:'2022-01',v:0.08},{d:'2022-06',v:1.58},{d:'2022-09',v:3.08},{d:'2022-12',v:4.33},{d:'2023-07',v:5.33},{d:'2023-12',v:5.33},{d:'2024-09',v:4.83},{d:'2024-12',v:4.33},{d:'2025-12',v:3.63},{d:'2026-03',v:3.64}],
+  IORB: [{d:'2022-01',v:0.15},{d:'2022-06',v:1.65},{d:'2022-09',v:3.15},{d:'2022-12',v:4.40},{d:'2023-07',v:5.40},{d:'2023-12',v:5.40},{d:'2024-09',v:4.90},{d:'2024-12',v:4.40},{d:'2025-12',v:3.65},{d:'2026-03',v:3.65}],
+  ONRRP:[{d:'2022-01',v:0.05},{d:'2022-06',v:1.55},{d:'2022-09',v:3.05},{d:'2022-12',v:4.30},{d:'2023-07',v:5.30},{d:'2023-12',v:5.30},{d:'2024-09',v:4.80},{d:'2024-12',v:4.25},{d:'2025-12',v:3.50},{d:'2026-03',v:3.50}],
+  SOFR: [{d:'2022-01',v:0.05},{d:'2022-06',v:1.53},{d:'2022-09',v:3.02},{d:'2022-12',v:4.30},{d:'2023-07',v:5.31},{d:'2023-12',v:5.31},{d:'2024-09',v:4.81},{d:'2024-12',v:4.29},{d:'2025-12',v:3.61},{d:'2026-03',v:3.63}],
+  TGCR: [{d:'2022-01',v:0.03},{d:'2022-06',v:1.51},{d:'2022-09',v:3.00},{d:'2022-12',v:4.28},{d:'2023-07',v:5.29},{d:'2023-12',v:5.29},{d:'2024-09',v:4.79},{d:'2024-12',v:4.27},{d:'2025-12',v:3.59},{d:'2026-03',v:3.61}],
+  BGCR: [{d:'2022-01',v:0.03},{d:'2022-06',v:1.50},{d:'2022-09',v:2.99},{d:'2022-12',v:4.27},{d:'2023-07',v:5.28},{d:'2023-12',v:5.28},{d:'2024-09',v:4.78},{d:'2024-12',v:4.26},{d:'2025-12',v:3.58},{d:'2026-03',v:3.60}],
+  OBFR: [{d:'2022-01',v:0.06},{d:'2022-06',v:1.54},{d:'2022-09',v:3.04},{d:'2022-12',v:4.31},{d:'2023-07',v:5.32},{d:'2023-12',v:5.32},{d:'2024-09',v:4.82},{d:'2024-12',v:4.30},{d:'2025-12',v:3.62},{d:'2026-03',v:3.63}],
+  RESBALNS:[{d:'2022-01',v:3900},{d:'2022-12',v:3000},{d:'2023-12',v:3500},{d:'2024-12',v:3200},{d:'2026-03',v:3200}],
+  WCURCIR: [{d:'2022-01',v:2200},{d:'2022-12',v:2260},{d:'2023-12',v:2290},{d:'2024-12',v:2310},{d:'2026-03',v:2330}],
+  ESTR: [{d:'2022-01',v:-0.57},{d:'2022-07',v:0.43},{d:'2022-12',v:1.90},{d:'2023-09',v:3.89},{d:'2023-12',v:3.89},{d:'2024-09',v:3.49},{d:'2024-12',v:2.89},{d:'2025-03',v:2.39},{d:'2025-12',v:2.14},{d:'2026-03',v:2.39}],
+  ECBDF:[{d:'2022-01',v:-0.50},{d:'2022-07',v:0.00},{d:'2022-12',v:2.00},{d:'2023-09',v:4.00},{d:'2023-12',v:4.00},{d:'2024-09',v:3.50},{d:'2024-12',v:3.00},{d:'2025-06',v:2.00},{d:'2025-12',v:2.00},{d:'2026-03',v:2.00}],
+  ECBMRO:[{d:'2022-01',v:0.00},{d:'2022-07',v:0.50},{d:'2022-12',v:2.50},{d:'2023-09',v:4.50},{d:'2023-12',v:4.50},{d:'2024-09',v:3.65},{d:'2024-12',v:3.15},{d:'2025-06',v:2.15},{d:'2025-12',v:2.15},{d:'2026-03',v:2.15}],
+  ECBMLF:[{d:'2022-01',v:0.25},{d:'2022-07',v:0.75},{d:'2022-12',v:2.75},{d:'2023-09',v:4.75},{d:'2023-12',v:4.75},{d:'2024-09',v:3.90},{d:'2024-12',v:3.40},{d:'2025-06',v:2.40},{d:'2025-12',v:2.40},{d:'2026-03',v:2.40}],
+  ECBASSETS:[{d:'2022-01',v:8700},{d:'2022-12',v:8000},{d:'2023-12',v:7000},{d:'2024-12',v:6350},{d:'2025-12',v:6230},{d:'2026-03',v:6227}],
+  ECBBNK:   [{d:'2022-01',v:1530},{d:'2022-12',v:1568},{d:'2023-12',v:1568},{d:'2024-12',v:1588},{d:'2025-12',v:1595},{d:'2026-03',v:1595}],
+};
+
+// ============================================================
+// HELPERS
+// ============================================================
+const last = a => a && a.length ? a[a.length-1] : null;
+const mean = a => a.reduce((s,v)=>s+v,0)/a.length;
+const pctile = (a,p) => { const s=[...a].sort((x,y)=>x-y); return s[Math.max(0,Math.floor(p/100*s.length)-1)]; };
+
+function ma(series,n){
+  return series.map((v,i)=>{
+    const sl=series.slice(Math.max(0,i-n+1),i+1).filter(x=>x!=null);
+    return sl.length ? +(mean(sl).toFixed(4)) : null;
+  });
+}
+
+function getLight(gauge,val,history){
+  if(val==null) return 'dim';
+  const vals=history.filter(v=>v!=null);
+  if(vals.length>=15){
+    const p75=pctile(vals,75), p95=pctile(vals,95);
+    if(val>=p95) return 'red';
+    if(val>=p75) return 'amber';
+    return 'green';
+  }
+  if(val>=gauge.redAbove) return 'red';
+  if(val>=gauge.amberAbove) return 'amber';
+  return 'green';
+}
+
+function mergeByDate(base,overlay){
+  const map={};
+  base.forEach(p=>{map[p.date]=p;});
+  overlay.forEach(p=>{map[p.date]=p;});
+  return Object.values(map).sort((a,b)=>a.date.localeCompare(b.date));
+}
+
+// ============================================================
+// SVG SPARKLINE (no JSX needed - plain SVG)
+// ============================================================
+function Sparkline({data,color,height=60,showZero=true}){
+  if(!data||data.length<2) return null;
+  const W=400, H=height;
+  const vals=data.map(d=>d.spread!=null?d.spread:(d.v!=null?d.v:0));
+  const ma5vals=ma(vals,5);
+  const minV=Math.min(...vals,showZero?0:Infinity);
+  const maxV=Math.max(...vals,showZero?0:-Infinity);
+  const range=maxV-minV||0.01;
+  const pad=4;
+  const toX=i=>pad+(i/(vals.length-1||1))*(W-2*pad);
+  const toY=v=>H-pad-((v-minV)/range)*(H-2*pad);
+  const rawPath=vals.map((v,i)=>(i===0?'M':'L')+toX(i).toFixed(1)+','+toY(v).toFixed(1)).join(' ');
+  const ma5Path=ma5vals.map((v,i)=>v!=null?(i===0?'M':'L')+toX(i).toFixed(1)+','+toY(v).toFixed(1):null).filter(Boolean).join(' ');
+  const zeroY=toY(0).toFixed(1);
+  return html`
+    <svg viewBox="0 0 ${W} ${H}" style=${{width:'100%',height,display:'block'}}>
+      ${showZero && html`<line x1=${pad} y1=${zeroY} x2=${W-pad} y2=${zeroY} stroke="rgba(255,255,255,0.12)" strokeDasharray="3 3"/>`}
+      <path d=${rawPath} fill="none" stroke=${color+'55'} strokeWidth="1.2"/>
+      <path d=${ma5Path} fill="none" stroke=${color} strokeWidth="2"/>
+    </svg>`;
+}
+
+// ============================================================
+// INTERACTIVE CHART
+// ============================================================
+function InteractiveChart({seriesArr,height=360}){
+  const [hover,setHover]=useState(null);
+  const [hiSeries,setHiSeries]=useState(null);
+  const svgRef=useRef(null);
+  if(!seriesArr||!seriesArr.length) return null;
+  const allVals=seriesArr.flatMap(s=>s.data.map(p=>p.v!=null?p.v:0));
+  const allDates=[...new Set(seriesArr.flatMap(s=>s.data.map(p=>p.d)))].sort();
+  if(allDates.length<2) return null;
+  const W=800,H=height,padL=44,padR=14,padT=12,padB=26;
+  const cW=W-padL-padR, cH=H-padT-padB;
+  const minV=Math.min(...allVals), maxV=Math.max(...allVals);
+  const range=maxV-minV||0.01;
+  const toX=i=>padL+(i/(allDates.length-1||1))*cW;
+  const toY=v=>padT+cH-((v-minV)/range)*cH;
+  const nTicks=6;
+  const ticks=Array.from({length:nTicks},(_,i)=>+(minV+(i/(nTicks-1))*range).toFixed(2));
+  const xStep=Math.ceil(allDates.length/8);
+  const xLabels=allDates.filter((_,i)=>i===0||i===allDates.length-1||i%xStep===0);
+  const paths=seriesArr.map(s=>{
+    let d='';
+    allDates.forEach((date,i)=>{
+      const p=s.data.find(x=>x.d===date);
+      if(!p) return;
+      const prev=allDates.slice(0,i).reverse().some(dd=>s.data.find(x=>x.d===dd));
+      d+=(d?'L':'M')+toX(i).toFixed(1)+','+toY(p.v).toFixed(1)+' ';
+    });
+    return {...s,pathD:d.trim()};
+  });
+  function onMouseMove(e){
+    const svg=svgRef.current; if(!svg) return;
+    const rect=svg.getBoundingClientRect();
+    const mx=(e.clientX-rect.left)*(W/rect.width);
+    if(mx<padL||mx>W-padR){setHover(null);return;}
+    const idx=Math.round((mx-padL)/cW*(allDates.length-1));
+    if(idx<0||idx>=allDates.length){setHover(null);return;}
+    const vals=seriesArr.map(s=>{
+      const p=s.data.find(x=>x.d===allDates[idx]);
+      return {label:s.label,color:s.color,v:p?p.v:null};
+    }).filter(v=>v.v!=null);
+    setHover({x:toX(idx),idx,vals});
+  }
+  return html`
+    <div>
+      <div style=${{position:'relative'}}>
+        <svg ref=${svgRef} viewBox="0 0 ${W} ${H}"
+          style=${{width:'100%',height,display:'block',cursor:'crosshair'}}
+          onMouseMove=${onMouseMove} onMouseLeave=${()=>setHover(null)}>
+          ${ticks.map((t,i)=>html`
+            <g key=${i}>
+              <line x1=${padL} y1=${toY(t)} x2=${W-padR} y2=${toY(t)} stroke="rgba(255,255,255,0.04)"/>
+              <text x=${padL-4} y=${toY(t)+4} fill="#e5e7eb" fontSize="9" fontFamily="monospace" textAnchor="end">${t}%</text>
+            </g>`)}
+          ${xLabels.map(d=>html`
+            <text key=${d} x=${toX(allDates.indexOf(d))} y=${H-4} fill="#9ca3af" fontSize="9" fontFamily="monospace" textAnchor="middle">${d}</text>`)}
+          ${paths.map(s=>html`
+            <path key=${s.label} d=${s.pathD} fill="none" stroke=${s.color}
+              strokeWidth=${hiSeries===s.label?2.5:1.5}
+              strokeDasharray=${s.dashed?'5 3':'none'}
+              opacity=${hiSeries&&hiSeries!==s.label?0.3:1}/>`)}
+          ${hover && html`<line x1=${hover.x} y1=${padT} x2=${hover.x} y2=${H-padB} stroke="rgba(255,255,255,0.2)" strokeWidth="1"/>`}
+        </svg>
+        ${hover && html`
+          <div style=${{position:'absolute',top:8,left:Math.min(hover.x/800*100+2,60)+'%',
+            background:'rgba(7,9,15,0.95)',border:'1px solid rgba(255,255,255,0.1)',
+            borderRadius:8,padding:'8px 12px',pointerEvents:'none',minWidth:140,zIndex:10}}>
+            <p style=${{color:C.muted,fontSize:9,marginBottom:6,fontFamily:'monospace'}}>${allDates[hover.idx]}</p>
+            ${hover.vals.map(v=>html`
+              <div key=${v.label} style=${{display:'flex',justifyContent:'space-between',gap:16,marginBottom:3}}>
+                <span style=${{color:v.color,fontSize:10,fontFamily:'monospace'}}>${v.label}</span>
+                <span style=${{color:C.text,fontSize:10,fontFamily:'monospace',fontWeight:700}}>${v.v.toFixed(2)}%</span>
+              </div>`)}
+          </div>`}
+      </div>
+      <div style=${{display:'flex',flexWrap:'wrap',gap:'3px 10px',marginTop:10,paddingLeft:padL+'px'}}>
+        ${seriesArr.map(s=>html`
+          <div key=${s.label}
+            onMouseEnter=${()=>setHiSeries(s.label)}
+            onMouseLeave=${()=>setHiSeries(null)}
+            style=${{display:'flex',alignItems:'center',gap:5,cursor:'pointer',padding:'3px 7px',
+              borderRadius:4,background:hiSeries===s.label?'rgba(255,255,255,0.07)':'transparent',
+              transition:'background .12s'}}>
+            <svg width="18" height="8">
+              <line x1="0" y1="4" x2="18" y2="4" stroke=${s.color}
+                strokeWidth=${hiSeries===s.label?3:2}
+                strokeDasharray=${s.dashed?'5 3':'none'}/>
+            </svg>
+            <span style=${{fontSize:10,fontFamily:"'JetBrains Mono',monospace",
+              color:hiSeries===s.label?s.color:'#a39070',
+              fontWeight:hiSeries===s.label?700:400,transition:'color .12s'}}>
+              ${s.label}
+            </span>
+          </div>`)}
+      </div>
+    </div>`;
+}
+
+// ============================================================
+// GAUGE CARD
+// ============================================================
+function GaugeCard({gauge,points,loading}){
+  const history=points.map(p=>p.spread);
+  const ma5=ma(history,5);
+  const rawLast=last(history);
+  const ma5Last=last(ma5);
+  const light=loading?'dim':getLight(gauge,ma5Last!=null?ma5Last:rawLast,history);
+  const lc=LC[light]||C.dim;
+  const cc=C.chart[gauge.id]||C.accent;
+  const catC=C.cat[gauge.category]||C.accent;
+  const bpVal=ma5Last!=null?ma5Last:rawLast;
+  const dispVal=loading?'--':bpVal!=null?(bpVal>0?'+':'')+(bpVal*100).toFixed(1)+' bp':'N/D';
+  return html`
+    <div style=${{background:C.panel,
+      border:'1px solid '+(light==='red'?'rgba(239,68,68,.35)':light==='amber'?'rgba(245,158,11,.25)':C.border),
+      borderRadius:14,padding:'16px 16px 12px',display:'flex',flexDirection:'column',gap:8,
+      position:'relative',overflow:'hidden',transition:'border-color .4s'}}>
+      <div style=${{position:'absolute',top:0,left:0,right:0,height:2,
+        background:'linear-gradient(90deg,'+lc+',transparent)',opacity:light==='dim'?.2:.9}}/>
+      <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+        <div>
+          <span style=${{fontSize:9,letterSpacing:1.5,textTransform:'uppercase',color:catC}}>${gauge.category}</span>
+          <h3 style=${{fontSize:15,fontWeight:700,color:C.text,margin:'2px 0 0',letterSpacing:-0.3}}>${gauge.label}</h3>
+        </div>
+        <div style=${{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:4}}>
+          <div style=${{display:'flex',gap:5,alignItems:'center'}}>
+            ${['green','amber','red'].map(s=>html`
+              <div key=${s} style=${{width:10,height:10,borderRadius:'50%',
+                background:light===s?LC[s]:'rgba(255,255,255,0.07)',
+                boxShadow:light===s?'0 0 8px '+LC[s]:'none',transition:'all .3s'}}/>`)}
+          </div>
+          <span style=${{fontSize:9,color:lc,letterSpacing:1}}>${LL[light]}</span>
+        </div>
+      </div>
+      <div style=${{display:'flex',alignItems:'baseline',gap:8}}>
+        <span style=${{fontSize:26,fontWeight:800,color:lc,lineHeight:1}}>${dispVal}</span>
+        ${rawLast!=null&&ma5Last!=null&&Math.abs(rawLast-ma5Last)>0.001 && html`
+          <span style=${{fontSize:10,color:C.muted}}>raw ${(rawLast*100).toFixed(1)}</span>`}
+      </div>
+      <span style=${{fontSize:10,color:C.muted,marginTop:-4}}>MA(5) ${points.length} obs</span>
+      <${Sparkline} data=${points} color=${cc} height=${54}/>
+      <p style=${{fontSize:10,color:C.muted,lineHeight:1.5,borderTop:'1px solid '+C.border,paddingTop:6}}>${gauge.note}</p>
+    </div>`;
+}
+
+// ============================================================
+// ALERT BANNER
+// ============================================================
+function AlertBanner({spreads}){
+  const lights=GAUGES.map(g=>{
+    const pts=spreads[g.id]||[]; const h=pts.map(p=>p.spread);
+    return getLight(g,last(ma(h,5))!=null?last(ma(h,5)):last(h),h);
+  });
+  const nRed=lights.filter(l=>l==='red').length;
+  const nAmber=lights.filter(l=>l==='amber').length;
+  const level=nRed>=2?3:nRed===1?2:nAmber>=1?1:0;
+  if(!level) return null;
+  const cfg={
+    1:{c:C.amber,bg:'rgba(245,158,11,.07)',b:'rgba(245,158,11,.22)',t:'Nivel 1 - Ambar aislado: estres localizado o efecto calendario.'},
+    2:{c:C.red,  bg:'rgba(239,68,68,.07)', b:'rgba(239,68,68,.25)', t:'Nivel 2 - Rojo + Ambar: episodio de plumbing. Vigila contagio.'},
+    3:{c:C.red,  bg:'rgba(239,68,68,.12)', b:'rgba(239,68,68,.40)', t:'Nivel 3 - 2+ ROJOS: riesgo dash-for-cash / margin calls.'},
+  }[level];
+  const redN=GAUGES.filter((_,i)=>lights[i]==='red').map(g=>g.label);
+  const ambN=GAUGES.filter((_,i)=>lights[i]==='amber').map(g=>g.label);
+  return html`
+    <div style=${{background:cfg.bg,border:'1px solid '+cfg.b,borderRadius:10,
+      padding:'12px 16px',marginBottom:18,display:'flex',gap:10,alignItems:'flex-start'}}>
+      <span style=${{color:cfg.c,fontSize:14,fontWeight:800}}>[!]</span>
+      <div>
+        <span style=${{color:cfg.c,fontSize:12,fontWeight:700}}>${cfg.t}</span>
+        <p style=${{color:C.muted,fontSize:10,marginTop:3}}>
+          ${redN.length?'Rojo: '+redN.join(', '):''}
+          ${ambN.length?' Ambar: '+ambN.join(', '):''}
+        </p>
+      </div>
+    </div>`;
+}
+
+// ============================================================
+// API FETCH
+// ============================================================
+async function claudeProxyFetch(){
+  const res=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json',
+              'anthropic-dangerous-direct-browser-access':'true',
+              'x-api-key':window.__ANTHROPIC_KEY__||'',
+              'anthropic-version':'2023-06-01'},
+    body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:800,
+      system:'JSON data API. Respond with valid JSON only.',
+      messages:[{role:'user',content:'Return current spread values for liquidity dashboard. JSON only: {"asOf":"2026-03-18","effr_iorb":[{"d":"2026-03","v":-0.01}],"sofr_iorb":[{"d":"2026-03","v":-0.02}],"tgcr_iorb":[{"d":"2026-03","v":-0.04}],"cp_sofr":[{"d":"2026-03","v":0.36}],"euribor_estr":[{"d":"2026-03","v":0.25}],"stlfsi":[{"d":"2026-03","v":-0.04}]} Confirm or correct:'}]})
+  });
+  const data=await res.json();
+  if(data.error) throw new Error(data.error.message);
+  const text=(data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('').trim();
+  const s=text.indexOf('{'),e=text.lastIndexOf('}');
+  if(s===-1) throw new Error('No JSON');
+  const parsed=JSON.parse(text.slice(s,e+1));
+  const result={};
+  ['effr_iorb','sofr_iorb','tgcr_iorb','cp_sofr','euribor_estr','stlfsi'].forEach(k=>{
+    if(Array.isArray(parsed[k])) result[k]=parsed[k].map(p=>({date:p.d,spread:+p.v}));
+  });
+  return result;
+}
+
+// ============================================================
+// MAIN APP
+// ============================================================
+function App(){
+  const [spreads,setSpreads]=useState(HIST);
+  const [loading,setLoading]=useState(false);
+  const [statusMsg,setStatusMsg]=useState('Datos embebidos cargados');
+  const [statusType,setStatusType]=useState('ok');
+  const [lastFetch,setLastFetch]=useState(null);
+  const [tab,setTab]=useState('gauges');
+  const [apiKey,setApiKey]=useState(()=>localStorage.getItem('anthro_key')||'');
+  const [keySaved,setKeySaved]=useState(false);
+
+  const saveKey=useCallback(k=>{
+    const t=k.trim();
+    window.__ANTHROPIC_KEY__=t;
+    localStorage.setItem('anthro_key',t);
+    setApiKey(t); setKeySaved(true);
+    setTimeout(()=>setKeySaved(false),2000);
+  },[]);
+
+  useEffect(()=>{
+    const s=localStorage.getItem('anthro_key')||'';
+    if(s){window.__ANTHROPIC_KEY__=s; setApiKey(s);}
+  },[]);
+
+  const doFetch=useCallback(async()=>{
+    setLoading(true); setStatusType('loading');
+    const isLocal=window.location.hostname==='localhost'||window.location.hostname==='127.0.0.1';
+    if(isLocal&&!window.__CFG__){
+      try{const cfg=await fetch('/api/config').then(r=>r.json());
+        if(cfg.anthropicKey) window.__ANTHROPIC_KEY__=cfg.anthropicKey;
+        window.__CFG__=true;}catch(e){}
+    }
+    try{
+      let result,source;
+      if(isLocal){
+        setStatusMsg('Descargando datos de FRED + BCE...');
+        const resp=await fetch('/api/rates');
+        if(!resp.ok) throw new Error('HTTP '+resp.status);
+        result=await resp.json();
+        source=result.source||'FRED + ECB';
+        if(result.ECBASSETS&&result.ECBASSETS.length>0) RH.ECBASSETS=result.ECBASSETS.map(p=>({d:p.date,v:p.spread}));
+        if(result.ECBBNK&&result.ECBBNK.length>0) RH.ECBBNK=result.ECBBNK.map(p=>({d:p.date,v:p.spread}));
+      } else if(window.__ANTHROPIC_KEY__){
+        setStatusMsg('Consultando via Claude...');
+        result=await claudeProxyFetch();
+        source='Claude proxy';
+      } else {
+        throw new Error('Abre con iniciar_dashboard.py para datos en tiempo real');
+      }
+      const merged={};
+      GAUGES.forEach(g=>{merged[g.id]=mergeByDate(HIST[g.id]||[],result[g.id]||[]);});
+      setSpreads(merged);
+      setLastFetch(new Date().toLocaleString('es-ES',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}));
+      setStatusType('ok'); setStatusMsg('OK '+source+' '+(result.asOf||''));
+    }catch(e){
+      setStatusType('warn'); setStatusMsg('Aviso: '+e.message.slice(0,80));
+    }finally{setLoading(false);}
+  },[]);
+
+  useEffect(()=>{doFetch();},[]);
+
+  const lights=GAUGES.map(g=>{
+    const pts=spreads[g.id]||[]; const h=pts.map(p=>p.spread);
+    return loading?'dim':getLight(g,last(ma(h,5))!=null?last(ma(h,5)):last(h),h);
+  });
+  const nRed=lights.filter(l=>l==='red').length;
+  const nAmber=lights.filter(l=>l==='amber').length;
+  const nGreen=lights.filter(l=>l==='green').length;
+  const lvl=nRed>=2?3:nRed===1?2:nAmber>=1?1:0;
+  const lvlMeta=[
+    {label:'NORMAL',color:C.green,icon:'OK'},
+    {label:'VIGILANCIA',color:C.amber,icon:'!'},
+    {label:'ALERTA',color:'#f97316',icon:'R'},
+    {label:'CRITICO',color:C.red,icon:'!!'},
+  ][lvl];
+  const scColor={loading:C.amber,ok:C.green,warn:C.amber}[statusType]||C.muted;
+
+  // Rate card helper
+  function RateCard({rate,group}){
+    const isMoney=rate.unit==='$bn'||rate.unit==='EUR bn';
+    const chg=+(rate.current-rate.prev).toFixed(isMoney?0:2);
+    const sym=rate.unit==='EUR bn'?'EUR ':rate.unit==='$bn'?'$':'';
+    const fmtV=v=>isMoney?sym+v.toLocaleString()+'bn':v.toFixed(2)+'%';
+    const fmtC=v=>isMoney?(v>0?'+':'')+sym+Math.abs(v).toLocaleString()+'bn':(v>0?'+':'')+v.toFixed(2)+'%';
+    const hist=RH[rate.id]||[];
+    return html`
+      <div style=${{background:C.panel,border:'1px solid '+group.color+'18',
+        borderRadius:12,padding:'14px 16px',position:'relative',overflow:'hidden',minWidth:0}}>
+        <div style=${{position:'absolute',top:0,left:0,right:0,height:2,
+          background:'linear-gradient(90deg,'+group.color+',transparent)'}}/>
+        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
+          <div style=${{minWidth:0,flex:1}}>
+            <p style=${{color:group.color,fontSize:10,letterSpacing:1.2,textTransform:'uppercase',
+              overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${rate.label}</p>
+            <p style=${{color:C.muted,fontSize:9,marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>${rate.desc}</p>
+          </div>
+          <span style=${{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:4,marginLeft:6,
+            flexShrink:0,whiteSpace:'nowrap',
+            background:chg<0?'rgba(34,197,94,.12)':chg>0?'rgba(239,68,68,.12)':'rgba(255,255,255,.06)',
+            color:chg<0?C.green:chg>0?C.red:C.muted}}>
+            ${fmtC(chg)}
+          </span>
+        </div>
+        <p style=${{color:C.text,fontSize:22,fontWeight:800,lineHeight:1,marginBottom:2}}>${fmtV(rate.current)}</p>
+        <p style=${{color:'#e5e7eb',fontSize:9}}>prev: ${fmtV(rate.prev)}</p>
+        ${hist.length>2 && html`
+          <div style=${{marginTop:8}}>
+            <${Sparkline} data=${hist.map(p=>({spread:p.v}))} color=${group.color} height=${36} showZero=${false}/>
+          </div>`}
+      </div>`;
+  }
+
+  return html`
+    <div style=${{minHeight:'100vh',background:C.bg,padding:'22px 18px',color:C.text}}>
+
+      <div style=${{maxWidth:1200,margin:'0 auto'}}>
+
+        <!-- HEADER -->
+        <div style=${{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:14,marginBottom:20}}>
+          <div>
+            <div style=${{display:'flex',alignItems:'center',gap:8,marginBottom:5}}>
+              <div class=${loading?'blink':''} style=${{width:7,height:7,borderRadius:'50%',
+                background:loading?C.amber:C.green,boxShadow:'0 0 6px '+(loading?C.amber:C.green)}}/>
+              <span style=${{fontSize:9,letterSpacing:2,textTransform:'uppercase',color:C.accent}}>Institutional Liquidity Monitor</span>
+            </div>
+            <h1 style=${{fontFamily:"'Bebas Neue',sans-serif",fontSize:'clamp(26px,4vw,48px)',letterSpacing:1,color:C.text,lineHeight:1}}>
+              PANEL DE LIQUIDEZ
+            </h1>
+            <p style=${{color:C.muted,fontSize:10,marginTop:4}}>USD money markets · EUR interbank · Indicadores de reservas Fed</p>
+          </div>
+          <div style=${{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8}}>
+            <button class="btn" onClick=${doFetch} disabled=${loading}
+              style=${{background:'rgba(245,158,11,.08)',border:'1px solid rgba(245,158,11,.3)',
+                borderRadius:8,padding:'8px 16px',color:C.accent,fontSize:11,
+                display:'flex',alignItems:'center',gap:8,opacity:loading?.6:1}}>
+              <span style=${{display:'inline-block',animation:loading?'spin 1s linear infinite':'none',fontSize:14}}>↻</span>
+              ${loading?'ACTUALIZANDO...':'ACTUALIZAR'}
+            </button>
+            <button class="btn" onClick=${async()=>{
+              try{ await fetch('/api/shutdown',{method:'POST'}); }catch(e){}
+              setTimeout(()=>window.close(),300);
+            }}
+              style=${{background:'rgba(239,68,68,.07)',border:'1px solid rgba(239,68,68,.25)',
+                borderRadius:8,padding:'8px 14px',color:'#f87171',fontSize:11,
+                display:'flex',alignItems:'center',gap:6}}>
+              <span style=${{fontSize:13}}>✕</span>
+              CERRAR
+            </button>
+            <div style=${{display:'flex',gap:6,alignItems:'center'}}>
+              <input type="password" placeholder="sk-ant-... (Anthropic API key)"
+                value=${apiKey} onInput=${e=>setApiKey(e.target.value)}
+                onKeyDown=${e=>e.key==='Enter'&&saveKey(apiKey)}
+                style=${{background:'rgba(255,255,255,.04)',
+                  border:'1px solid '+(apiKey?'rgba(34,197,94,.4)':'rgba(255,255,255,.1)'),
+                  borderRadius:7,padding:'6px 10px',color:C.text,fontSize:11,width:220}}/>
+              <button class="btn" onClick=${()=>saveKey(apiKey)}
+                style=${{background:keySaved?'rgba(34,197,94,.15)':'rgba(245,158,11,.08)',
+                  border:'1px solid '+(keySaved?'rgba(34,197,94,.4)':'rgba(245,158,11,.25)'),
+                  borderRadius:7,padding:'6px 10px',color:keySaved?C.green:C.accent,fontSize:11}}>
+                ${keySaved?'OK':'Guardar'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- STATUS -->
+        <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:18,padding:'7px 14px',
+          borderRadius:8,background:'rgba(255,255,255,.018)',border:'1px solid rgba(255,255,255,.04)'}}>
+          <div style=${{width:5,height:5,borderRadius:'50%',background:scColor}}/>
+          <span style=${{color:scColor,fontSize:10}}>${statusMsg}</span>
+          ${lastFetch && html`<span style=${{color:'#3d3420',fontSize:10,marginLeft:'auto'}}>actualizado: ${lastFetch}</span>`}
+        </div>
+
+        <!-- SUMMARY STRIP -->
+        <div style=${{display:'flex',gap:10,marginBottom:20,flexWrap:'wrap'}}>
+          ${[{label:'VERDE',count:nGreen,color:C.green},{label:'AMBAR',count:nAmber,color:C.amber},{label:'ROJO',count:nRed,color:C.red}].map(s=>html`
+            <div key=${s.label} style=${{background:C.panel,border:'1px solid '+s.color+'20',borderRadius:10,
+              padding:'10px 18px',flex:1,minWidth:90,display:'flex',alignItems:'center',gap:10}}>
+              <div style=${{width:10,height:10,borderRadius:'50%',background:s.color,
+                boxShadow:s.count>0?'0 0 8px '+s.color:'none'}}/>
+              <div>
+                <p style=${{color:s.color,fontSize:20,fontWeight:800,lineHeight:1}}>${s.count}</p>
+                <p style=${{color:C.muted,fontSize:9,letterSpacing:1}}>${s.label}</p>
+              </div>
+            </div>`)}
+          <div style=${{background:C.panel,border:'1px solid '+lvlMeta.color+'20',borderRadius:10,
+            padding:'10px 18px',flex:2,minWidth:160,display:'flex',alignItems:'center',gap:10}}>
+            <span style=${{color:lvlMeta.color,fontSize:16,fontWeight:800}}>[${lvlMeta.icon}]</span>
+            <div>
+              <p style=${{color:lvlMeta.color,fontSize:13,fontWeight:800,lineHeight:1}}>NIVEL ${lvl} - ${lvlMeta.label}</p>
+              <p style=${{color:C.muted,fontSize:9,marginTop:3}}>
+                ${['Condiciones normales','Ambar aislado','Episodio plumbing','Dash-for-cash'][lvl]}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        ${!loading && html`<${AlertBanner} spreads=${spreads}/>`}
+
+        <!-- TABS -->
+        <div style=${{display:'flex',gap:4,marginBottom:18,borderBottom:'1px solid '+C.border,paddingBottom:10}}>
+          ${[['gauges','MANOMETROS'],['rates','TASAS ACTUALES'],['guide','GUIA']].map(([k,l])=>html`
+            <button key=${k} class="tab-btn" onClick=${()=>setTab(k)}
+              style=${{background:tab===k?'rgba(245,158,11,.1)':'transparent',
+                border:'1px solid '+(tab===k?'rgba(245,158,11,.3)':'transparent'),
+                color:tab===k?C.accent:C.muted,letterSpacing:1}}>
+              ${l}
+            </button>`)}
+        </div>
+
+        <!-- TAB: MANOMETROS -->
+        ${tab==='gauges' && html`
+          <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(310px,1fr))',gap:14}}>
+            ${GAUGES.map((g,i)=>html`
+              <div key=${g.id} style=${{animation:'fadein .3s ease',animationDelay:i*60+'ms'}}>
+                <${GaugeCard} gauge=${g} points=${spreads[g.id]||[]} loading=${loading}/>
+              </div>`)}
+          </div>`}
+
+        <!-- TAB: TASAS ACTUALES -->
+        ${tab==='rates' && html`
+          <div>
+            ${RATE_GROUPS.map(group=>html`
+              <div key=${group.label} style=${{marginBottom:20}}>
+                <div style=${{display:'flex',alignItems:'center',gap:10,marginBottom:12,padding:'8px 14px',
+                  borderRadius:8,background:group.color+'10',border:'1px solid '+group.color+'25'}}>
+                  <span style=${{fontSize:11,fontWeight:700,color:group.color,letterSpacing:1}}>[${group.flag}] ${group.label}</span>
+                </div>
+                ${group.rows.map((row,ri)=>html`
+                  <div key=${ri} style=${{display:'grid',
+                    gridTemplateColumns:'repeat('+Math.min(row.length,4)+',1fr)',
+                    gap:10,marginBottom:10}}>
+                    ${row.map(rate=>html`<${RateCard} key=${rate.id} rate=${rate} group=${group}/>`)}
+                  </div>`)}
+              </div>`)}
+
+            <!-- Fed Chart -->
+            <div style=${{background:C.panel,border:'1px solid '+C.border,borderRadius:16,padding:'20px 20px 16px',marginBottom:18}}>
+              <p style=${{color:'#f59e0b',fontSize:10,letterSpacing:1.5,textTransform:'uppercase',marginBottom:4}}>US Federal Reserve - Evolucion historica 2022-2026</p>
+              <p style=${{color:C.muted,fontSize:9,marginBottom:14}}>Cursor sobre el grafico para valores exactos</p>
+              <${InteractiveChart} height=${360} seriesArr=${[
+                {data:RH.FFTARGETHI,color:'#6b3a00',label:'FF Target Max',dashed:true},
+                {data:RH.FFTARGETLO,color:'#4a2800',label:'FF Target Min',dashed:true},
+                {data:RH.EFFR,color:'#f59e0b',label:'EFFR',dashed:false},
+                {data:RH.IORB,color:'#fbbf24',label:'IORB',dashed:false},
+                {data:RH.ONRRP,color:'#d97706',label:'ON RRP',dashed:false},
+                {data:RH.SOFR,color:'#f97316',label:'SOFR',dashed:false},
+                {data:RH.TGCR,color:'#ea580c',label:'TGCR',dashed:false},
+                {data:RH.BGCR,color:'#c99a3b',label:'BGCR',dashed:false},
+                {data:RH.OBFR,color:'#d4a853',label:'OBFR',dashed:false},
+              ]}/>
+            </div>
+
+            <!-- ECB Chart -->
+            <div style=${{background:C.panel,border:'1px solid '+C.border,borderRadius:16,padding:'20px 20px 16px',marginBottom:18}}>
+              <p style=${{color:'#e2c97e',fontSize:10,letterSpacing:1.5,textTransform:'uppercase',marginBottom:4}}>European Central Bank - Evolucion historica 2022-2026</p>
+              <p style=${{color:C.muted,fontSize:9,marginBottom:14}}>Cursor sobre el grafico para valores exactos</p>
+              <${InteractiveChart} height=${300} seriesArr=${[
+                {data:RH.ECBMLF,color:'#b8881f',label:'Marginal Lending',dashed:true},
+                {data:RH.ECBMRO,color:'#d4a853',label:'Main Refinancing',dashed:false},
+                {data:RH.ECBDF,color:'#e2c97e',label:'Deposit Facility',dashed:false},
+                {data:RH.ESTR,color:'#fbbf24',label:'ESTR',dashed:false},
+              ]}/>
+            </div>
+          </div>`}
+
+        <!-- TAB: GUIA -->
+        ${tab==='guide' && html`
+          <div style=${{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(340px,1fr))',gap:14}}>
+            ${[
+              {title:'Regla general',color:C.accent,items:['Usa MA(5d), nunca valores de un solo dia','Filtra turn-dates: fin de mes/trimestre crean picos espurios','Senal seria = nivel alto + persistencia + corroboracion multiple']},
+              {title:'1. Interbancario EUR',color:'#e2c97e',items:['Equivalente moderno del FRA/OIS en euros','ECB: tipicamente -10/-16 bp en 2023 (negativo = normal)','Paso a positivo persistente = senal de estres bancario EUR']},
+              {title:'2. Reservas USD',color:'#f97316',items:['Trilateral de presion: EFFR, SOFR y TGCR vs IORB','Verde: spreads bajos y estables','SOFR>IORB un dia NO es crisis -- necesita persistencia']},
+              {title:'3. CP-OIS USD',color:'#ea580c',items:['Sustituto del LIBOR-OIS post-transicion de tasas','CP AA 3M - SOFR: coste funding bancario unsecured USD','Spike = estres de credito/liquidez bancario USD']},
+              {title:'Reglas de decision',color:C.amber,items:['Nivel 1 (ambar aislado): ruido o estres localizado','Nivel 2 (rojo+ambar): reduce exposicion a apalancamiento','Nivel 3 (2+ rojos): dash-for-cash; actua sin esperar']},
+              {title:'Fuentes de datos',color:'#d4a853',items:['FRED: EFFR IORB SOFR TGCRRATE BGCR OBFR DCPF3M','FRED: ECBESTRVOLWGTTRMDMNRT IR3TIB01EZM156N STLFSI4','FRED: ECBASSETSW RRPONTSYAWARD RESBALNS WCURCIR','BCE: BKN via data-api.ecb.europa.eu']},
+            ].map(card=>html`
+              <div key=${card.title} style=${{background:C.panel,border:'1px solid '+C.border,
+                borderRadius:12,padding:'16px 18px',position:'relative',overflow:'hidden'}}>
+                <div style=${{position:'absolute',top:0,left:0,right:0,height:2,
+                  background:'linear-gradient(90deg,'+card.color+',transparent)'}}/>
+                <h3 style=${{fontSize:12,color:card.color,letterSpacing:.5,fontWeight:700,marginBottom:10}}>${card.title}</h3>
+                <ul style=${{listStyle:'none',display:'flex',flexDirection:'column',gap:6}}>
+                  ${card.items.map((item,i)=>html`
+                    <li key=${i} style=${{fontSize:11,color:C.muted,lineHeight:1.5,paddingLeft:12,position:'relative'}}>
+                      <span style=${{position:'absolute',left:0,color:card.color}}>></span>${item}
+                    </li>`)}
+                </ul>
+              </div>`)}
+          </div>`}
+
+        <!-- FOOTER -->
+        <div style=${{marginTop:22,display:'flex',justifyContent:'space-between',flexWrap:'wrap',
+          gap:6,borderTop:'1px solid '+C.border,paddingTop:12}}>
+          <p style=${{color:'#6b7280',fontSize:10}}>FRED: EFFR IORB SOFR TGCRRATE BGCR OBFR DCPF3M ECBESTRVOLWGTTRMDMNRT STLFSI4 ECBASSETSW</p>
+          <p style=${{color:'#6b7280',fontSize:10}}>BCE: BKN (billetes en circulacion)</p>
+        </div>
+
+      </div>
+    </div>`;
+}
+
+// Mount
+document.getElementById('loading').style.display='none';
+document.getElementById('root').style.display='block';
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: panel-liquidez
+    runtime: python
+    buildCommand: "echo 'No build needed'"
+    startCommand: "python server.py"
+    envVars:
+      - key: FRED_KEY
+        sync: false   # You'll enter this manually in Render dashboard
