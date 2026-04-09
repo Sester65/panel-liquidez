@@ -172,17 +172,31 @@ def get_rates_data():
 _rates_cache = None
 _cache_lock  = threading.Lock()
 
-def get_rates_data():
-    global _rates_cache
+import datetime as _dt
+
+_cache_timestamp = None   # when the cache was last populated
+
+def _cache_is_stale():
+    """Returns True if cache is missing or older than 6 hours."""
+    if _rates_cache is None or _cache_timestamp is None:
+        return True
+    age = (_dt.datetime.utcnow() - _cache_timestamp).total_seconds()
+    return age > 6 * 3600  # 6 hours
+
+def get_rates_data(force=False):
+    global _rates_cache, _cache_timestamp
     with _cache_lock:
-        if _rates_cache is None and fred_key:
+        if fred_key and (force or _cache_is_stale()):
+            print(f"  Actualizando datos FRED ({'forzado' if force else 'cache caducado'})...", flush=True)
             try:
                 _rates_cache = fetch_all_fred(fred_key)
+                _cache_timestamp = _dt.datetime.utcnow()
+                print(f"  Cache actualizado: {_cache_timestamp.strftime('%Y-%m-%d %H:%M')} UTC", flush=True)
             except Exception as e:
                 print(f"  ERROR FRED: {e}", flush=True)
         if not _rates_cache:
             _rates_cache = {
-                "asOf": __import__("datetime").date.today().isoformat(),
+                "asOf": _dt.date.today().isoformat(),
                 "source": "Sin datos FRED",
                 "effr_iorb":[], "sofr_iorb":[], "tgcr_iorb":[],
                 "cp_sofr":[], "euribor_estr":[], "stlfsi":[],
@@ -192,6 +206,8 @@ def get_rates_data():
 
 if fred_key:
     threading.Thread(target=get_rates_data, daemon=True).start()
+else:
+    print("  Sin FRED_KEY — configura la variable de entorno en Render.", flush=True)
 
 # ── Servidor HTTP ───────────────────────────────────────────────────────────────
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -208,10 +224,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         elif self.path in ("/api/rates", "/api/rates/"):
             self._serve_json(get_rates_data())
         elif self.path == "/api/refresh":
-            global _rates_cache
-            with _cache_lock:
-                _rates_cache = None
-            self._serve_json(get_rates_data())
+            self._serve_json(get_rates_data(force=True))
         elif self.path in ("/", "/index.html", ""):
             self._serve_html()
         else:
